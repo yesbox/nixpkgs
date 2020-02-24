@@ -1,17 +1,20 @@
-# This tests whether UPnP port mappings can be created using Miniupnpd
-# and Miniupnpc.
+# This tests whether UPnP and NAT-PMP port mappings can be created
+# using Miniupnpd, Miniupnpc and Libnatpmp.
+#
 # It runs a Miniupnpd service on one machine, and verifies
-# a client can indeed create a port mapping using Miniupnpc. If
-# this succeeds an external client will try to connect to the port
-# mapping.
+# a machine hosting a server can indeed create and remove
+# port mappings using Miniupnpc and Libnatpmp.
+#
+# An external client will try to connect to the port
+# mapping both when the it's opened and closed.
 
 import ./make-test-python.nix ({ pkgs, ... }:
 
 let
   internalRouterAddress = "192.168.3.1";
-  internalClient1Address = "192.168.3.2";
+  internalServerAddress = "192.168.3.2";
   externalRouterAddress = "80.100.100.1";
-  externalClient2Address = "80.100.100.2";
+  externalClientAddress = "80.100.100.2";
 in
 {
   name = "upnp";
@@ -29,6 +32,7 @@ in
           networking.nat.externalInterface = "eth1";
           networking.firewall.enable = true;
           networking.firewall.trustedInterfaces = [ "eth2" ];
+          networking.firewall.rejectPackets = true;
           networking.interfaces.eth1.ipv4.addresses = [
             { address = externalRouterAddress; prefixLength = 24; }
           ];
@@ -37,40 +41,43 @@ in
           ];
           services.miniupnpd = {
             enable = true;
+            upnp = true;
+            natpmp = true;
             externalInterface = "eth1";
-            internalIPs = [ "eth2" ];
+            internalIPs = [ internalRouterAddress ];
             appendConfig = ''
               ext_ip=${externalRouterAddress}
             '';
           };
         };
 
-      client1 =
+      internalServer =
         { pkgs, nodes, ... }:
-        { environment.systemPackages = [ pkgs.miniupnpc_2 pkgs.netcat ];
-          virtualisation.vlans = [ 2 ];
+        { virtualisation.vlans = [ 2 ];
+          environment.systemPackages = [ pkgs.miniupnpc_2 pkgs.libnatpmp ];
           networking.defaultGateway = internalRouterAddress;
           networking.interfaces.eth1.ipv4.addresses = [
-            { address = internalClient1Address; prefixLength = 24; }
+            { address = internalServerAddress; prefixLength = 24; }
           ];
           networking.firewall.enable = false;
 
           services.httpd.enable = true;
           services.httpd.virtualHosts.localhost = {
-            listen = [{ ip = "*"; port = 9000; }];
+            listen = [
+              { ip = "*"; port = 9001; }
+              { ip = "*"; port = 9002; }
+            ];
             adminAddr = "foo@example.org";
             documentRoot = "/tmp";
           };
         };
 
-      client2 =
+      externalClient =
         { pkgs, ... }:
-        { environment.systemPackages = [ pkgs.miniupnpc_2 ];
-          virtualisation.vlans = [ 1 ];
+        { virtualisation.vlans = [ 1 ];
           networking.interfaces.eth1.ipv4.addresses = [
-            { address = externalClient2Address; prefixLength = 24; }
+            { address = externalClientAddress; prefixLength = 24; }
           ];
-          networking.firewall.enable = false;
         };
     };
 
@@ -79,18 +86,34 @@ in
     ''
       start_all()
 
-      # Wait for network and miniupnpd.
+      # Wait for router network and miniupnpd
       router.wait_for_unit("network-online.target")
-      # $router.wait_for_unit("nat")
       router.wait_for_unit("firewall.service")
       router.wait_for_unit("miniupnpd")
 
-      client1.wait_for_unit("network-online.target")
+      # Wait for server
+      internalServer.wait_for_unit("network-online.target")
+      internalServer.wait_for_unit("httpd")
 
-      client1.succeed("upnpc -a ${internalClient1Address} 9000 9000 TCP")
+      # Wait for client network and ensure the server is not yet reachable
+      externalClient.wait_for_unit("network-online.target")
+      externalClient.fail("curl --fail http://${externalRouterAddress}:9001/")
+      externalClient.fail("curl --fail http://${externalRouterAddress}:9002/")
 
-      client1.wait_for_unit("httpd")
-      client2.wait_until_succeeds("curl http://${externalRouterAddress}:9000/")
+      ## uPnP open
+      internalServer.succeed("upnpc -a ${internalServerAddress} 9001 9001 TCP")
+      externalClient.wait_until_succeeds("curl http://${externalRouterAddress}:9001/")
+
+      ## uPnP close
+      internalServer.succeed("upnpc -d 9001 TCP ${internalServerAddress}")
+      externalClient.fail("curl --fail http://${externalRouterAddress}:9001/")
+
+      # NAT-PMP open
+      internalServer.succeed("natpmpc -g ${internalRouterAddress} -a 9002 9002 TCP 3600")
+      externalClient.wait_until_succeeds("curl http://${externalRouterAddress}:9002/")
+
+      # NAT-PMP close
+      internalServer.succeed("natpmpc -g ${internalRouterAddress} -a 9002 9002 TCP 0")
+      externalClient.fail("curl --fail http://${externalRouterAddress}:9002/")
     '';
-
 })
