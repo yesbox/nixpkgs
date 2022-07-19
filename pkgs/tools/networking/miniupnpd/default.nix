@@ -8,11 +8,11 @@ let
 in
 stdenv.mkDerivation rec {
   pname = "miniupnpd";
-  version = "2.1.20190502";
+  version = "2.3.0";
 
   src = fetchurl {
     url = "http://miniupnp.free.fr/files/download.php?file=miniupnpd-${version}.tar.gz";
-    sha256 = "1m8d0g9b0bjwsnqccw1yapp6n0jghmgzwixwjflwmvi2fi6hdp4b";
+    hash = "sha256-/56V42DHuq51dXW1utwhqxxkPTWZVvloVAtPgCb6z5w=";
     name = "miniupnpd-${version}.tar.gz";
   };
 
@@ -21,8 +21,9 @@ stdenv.mkDerivation rec {
 
   makefile = "Makefile.linux";
 
-  buildFlags = [ "miniupnpd" "genuuid" ];
+  buildFlags = [ "miniupnpd" ];
 
+  dontAddPrefix = true;
   installFlags = [ "PREFIX=$(out)" "INSTALLPREFIX=$(out)" ];
 
   postFixup = ''
